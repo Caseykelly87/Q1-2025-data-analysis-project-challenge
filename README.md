@@ -1,3 +1,34 @@
+## ************  CONFIGURATION  ************ ##
+
+This project uses a **Python virtual environment** to manage dependencies! This **venv** file is included in the .gitignore and will need to be created and activated manually BEFORE requirements.txt install.
+## Python Virtual Environments Documention "https://docs.python.org/3/library/venv.html"
+
+
+## Requires registration for a Bureau of Labor Statistics version 2 API KEY at "https://data.bls.gov/registrationEngine/"
+
+This project uses **".env" & Environment Variables** to store sensitive information such as API keys to mimic real-world applications! This file is included in the .gitignore and will require creation. 
+NOTE: Confiuration requires only that you create a file in project root named **.env** to store your **BLS_API_KEY=XXXXXXXX "YOUR KEY" XXXXXXXXXXXX** variable!
+## Python-dotnet Documention "https://github.com/theskumar/python-dotenv"
+
+
+## *************** PROJECT ***************** ##
+
+Still in development, currently functions by running the following scripts individually in order. Future plans include creating unit tests before expanding the datasets used for this analysis. Streamlining workflow by automating the process into one executable main.py script, ensuring that the output is pre-processed and structured appropriately for generation of .twb files for direct integration with Tableau.
+
+**collect_data.py** retrieves Consumer Price Index data for all urban consumers, years 2020-2024 using the BLS API **APIKEY Required**
+
+**generate_data.py** utilizes the Consumer Price Index data retrieved by collect_data.py as a reference to SIMULATE data patterns that closely resemble real-world economic trends. Monthly sales totals, years 2020-2024 for 25 stores are generated broken down by department.
+
+**process_data** merges the cpi and sales data sets while enhancing readablity and eliminating redundancey before generating a conslidataed CSV of the processed data.
+
+**analyze_data.py** performs analysis in thee key areas: exploratory data, time series, and correlation. Prints various statistics to the console, aggregates and plots data for visualizations.
+
+
+
+
+                                                          ORIGINAL ASSIGNMENT
+
+
 Below is a **Data Analysis project** outline designed to introduce **beginner-level** concepts in data manipulation (using SQL, Pandas, or Excel) and **data visualization** (using Tableau or Power BI). It also includes **optional, more advanced** requirements for those who want to challenge themselves further. The scenario involves performing a **market analysis** of publicly available grocery data in the context of recent inflation trends and using verified sales data to provide strategic recommendations to an executive committee at a major grocery chain.
 
 ---
