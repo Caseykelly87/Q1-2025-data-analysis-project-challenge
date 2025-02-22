@@ -11,7 +11,9 @@ __pycache__/
 *.pyc
 *.pyo
 
-tests/
+.pytest_cache
+
+
 results/
 *.csv
 logs/
