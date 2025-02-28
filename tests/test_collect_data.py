@@ -1,8 +1,12 @@
 import pytest
 import requests
+import warnings
 import pandas as pd
 import os
+import sys
+import logging
 from unittest.mock import patch, MagicMock
+from io import StringIO
 from scripts.collect_data import fetch_cpi_data_from_api, process_cpi_data, save_cpi_data_to_csv, fetch_cpi_data
 
 # Sample API response JSON
@@ -18,6 +22,7 @@ SAMPLE_API_RESPONSE = {
 }
 
 
+#@pytest.mark.filterwarnings("Internal Server Error")
 @pytest.fixture
 def mock_api_response():
     """Mock successful API response."""
@@ -35,27 +40,38 @@ def test_fetch_cpi_data_from_api_success(mock_api_response):
         assert "series" in data["Results"]
         assert isinstance(data["Results"]["series"], list)
 
-
-def test_fetch_cpi_data_from_api_failure():
-    """Test API failure handling."""
+def test_fetch_cpi_data_from_api_failure(caplog):
     mock_response = MagicMock()
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
+
+    logger = logging.getLogger()
+    
+    # Redirect stderr to silence log output during this test
+    original_stderr = sys.stderr
+    sys.stderr = StringIO()
     
     with patch("requests.post", return_value=mock_response):
-        with pytest.raises(RuntimeError, match="API request failed with status code 500"):
-            fetch_cpi_data_from_api()
+        with caplog.at_level(logging.ERROR):  # Capture error logs
+            with pytest.raises(RuntimeError, match="API request failed with status code 500"):
+                fetch_cpi_data_from_api()
+
+    # Restore stderr to its original state
+    sys.stderr = original_stderr
+    
+    # Ensure the error message is logged
+    assert "API Request Failed: 500 - Internal Server Error" in caplog.text 
 
 
 def test_fetch_cpi_data_from_api_missing_api_key():
-    """Test missing API key raises ValueError."""
+    # Test missing API key raises ValueError.
     with patch.dict(os.environ, {"BLS_API_KEY": ""}):
         with pytest.raises(ValueError, match="BLS_API_KEY is not set!"):
             fetch_cpi_data_from_api()
 
 
 def test_process_cpi_data_valid():
-    """Test processing API response into DataFrame."""
+    # Test processing API response into DataFrame.
     df = process_cpi_data(SAMPLE_API_RESPONSE)
     assert isinstance(df, pd.DataFrame)
     assert list(df.columns) == ["year", "periodName", "value"]
