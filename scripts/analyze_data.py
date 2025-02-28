@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 DATA_FILEPATH = "data/processed/merged_data.csv"
 
 def load_data(filepath):
-    """Load merged data from CSV file."""
+    # Load merged data from CSV file.
     try:
         df = pd.read_csv(filepath)
         logging.info(f"Data loaded successfully from {filepath}")
@@ -28,7 +28,7 @@ def load_data(filepath):
         return None
 
 def display_data_info(df):
-    """Display information and summary of the DataFrame."""
+    # Display information and summary of the DataFrame.
     if df is not None:
         logging.info("Displaying data information and summary")
         print(df.info())
@@ -36,27 +36,27 @@ def display_data_info(df):
         print(df["total_sales"].describe())
 
 def get_department_sales(df):
-    """Calculate total sales by department."""
+    # Calculate total sales by department.
     if df is not None:
         logging.info("Calculating total sales by department")
         department_sales = df.groupby("department")["total_sales"].sum().sort_values(ascending=False)
         print(department_sales.to_frame())  # Convert to DataFrame for better readability
 
 def get_cpi_by_year(df):
-    """Calculate average CPI per year."""
+    # Calculate average CPI per year.
     if df is not None:
         logging.info("Calculating average CPI per year")
         cpi_by_year = df.groupby("year")["CPI_U"].mean()
         print(cpi_by_year)
 
 def display_sample_data(df):
-    """Display sample data for verification."""
+    # Display sample data for verification.
     if df is not None:
         logging.info("Displaying sample data")
         print(df[['year', 'month', 'department', 'total_sales']].head(12))
 
 def plot_monthly_sales_trends(df):
-    """Plot monthly sales trends."""
+    # Plot monthly sales trends.
     if df is not None:
         logging.info("Plotting monthly sales trends")
         
@@ -95,18 +95,38 @@ def plot_monthly_sales_trends(df):
 
 
 def perform_time_series_analysis(df):
-    """Perform time series analysis on sales data."""
+    # Perform time series analysis on sales data.
     if df is not None:
         logging.info("Performing time series analysis on sales data")
-        df["date"] = pd.to_datetime(df["year"].astype(str) + " " + df["month"].astype(str), format="%Y %B")
-        df = df.sort_values("date")
-        sales_trend = df.groupby("date")["total_sales"].sum()
+
+        # Ensure 'date' is in the DataFrame as a column or index
+        if "date" not in df.columns:
+            df["date"] = pd.to_datetime(df["year"].astype(str) + " " + df["month"].astype(str), format="%Y %B")
+            df.set_index("date", inplace=True)
+        
+        # Sort DataFrame by date index
+        df = df.sort_index()
+        
+        # Group by date and sum total sales
+        sales_trend = df["total_sales"]
+        
+        # Sort DataFrame by date index
+        df = df.sort_index()
+
+        # Group by date and sum total sales
+        sales_trend = df["total_sales"]
+        
+        # Perform seasonal decomposition
         decomposition = seasonal_decompose(sales_trend, model="additive", period=12)
         decomposition.plot()
+        
+        # Show the plot
         plt.show()
 
+
+
 def plot_correlation_matrix(df):
-    """Plot correlation matrix between CPI and sales."""
+    # Plot correlation matrix between CPI and sales.
     if df is not None:
         logging.info("Plotting correlation matrix between CPI and sales")
         corr = df[["total_sales", "CPI_U"]].corr()
@@ -115,7 +135,7 @@ def plot_correlation_matrix(df):
         plt.show()
 
 def calculate_pearson_correlation(df):
-    """Calculate Pearson correlation between total sales and CPI."""
+    # Calculate Pearson correlation between total sales and CPI.
     if df is not None:
         logging.info("Calculating Pearson correlation between total sales and CPI")
         corr_value, p_value = stats.pearsonr(df["total_sales"], df["CPI_U"])
