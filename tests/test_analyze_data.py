@@ -1,6 +1,8 @@
 import pytest
 import pandas as pd
 import logging
+import matplotlib
+matplotlib.use('Agg') # set non-GUI backend
 import matplotlib.pyplot as plt
 import seaborn as sns
 import scipy.stats as stats
