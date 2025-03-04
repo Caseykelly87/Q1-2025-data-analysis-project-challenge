@@ -6,7 +6,7 @@ import os
 #        DATA LOADING          #
 # ---------------------------- #
 def load_cpi_data(cpi_path="data/raw/cpi_data.csv", start_year=2020, end_year=2024):
-    """Loads and processes CPI data, returning a dictionary {(year, month): cpi_value}"""
+    # Loads and processes CPI data, returning a dictionary {(year, month): cpi_value}
 
     cpi_df = pd.read_csv(cpi_path)
 
@@ -28,7 +28,7 @@ def load_cpi_data(cpi_path="data/raw/cpi_data.csv", start_year=2020, end_year=20
 #      DATA GENERATION         #
 # ---------------------------- #
 def generate_sales_data(cpi_dict, start_year=2020, end_year=2024, stores=range(101, 126)):
-    """Generates synthetic sales data based on store, department, seasonality, and inflation adjustments."""
+    # Generates synthetic sales data based on store, department, seasonality, and inflation adjustments.
     
     # Define date range
     dates = pd.date_range(start=f"{start_year}-01-01", end=f"{end_year}-12-01", freq="MS")
@@ -64,7 +64,7 @@ def generate_sales_data(cpi_dict, start_year=2020, end_year=2024, stores=range(1
 #     HELPER FUNCTIONS         #
 # ---------------------------- #
 def get_department_data():
-    """Returns department names, base sales, base units, growth rates, and seasonality multipliers."""
+    # Returns department names, base sales, base units, growth rates, and seasonality multipliers.
     departments = ["Produce", "Dairy", "Meat", "Seafood", "Grocery", "Non-food", "Liquor", "Floral", "Frozen", "Deli"]
 
     base_sales = {
@@ -98,7 +98,7 @@ def get_department_data():
     return departments, base_sales, base_units, growth_rates, seasonality
 
 def calculate_sales_units(year, month, dept, base_sales, base_units, growth_rates, seasonality, cpi_multiplier):
-    """Calculates total sales and units sold based on department trends, seasonality, and inflation."""
+    #  Calculates total sales and units sold based on department trends, seasonality, and inflation.
     months_since_start = (year - 2020) * 12 + (month - 1)
     growth_multiplier = (1 + growth_rates[dept]) ** months_since_start
     season_multiplier = seasonality[dept][month - 1]
@@ -117,7 +117,7 @@ def calculate_sales_units(year, month, dept, base_sales, base_units, growth_rate
 #        DATA EXPORTING        #
 # ---------------------------- #
 def save_sales_data(df, output_path="data/raw/sales_data.csv"):
-    """Saves the generated sales data to a CSV file."""
+    # Saves the generated sales data to a CSV file.
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     df = df.sort_values(by=["year", "month", "store_id", "department"])
     df.to_csv(output_path, index=False)
@@ -127,7 +127,7 @@ def save_sales_data(df, output_path="data/raw/sales_data.csv"):
 #      MAIN FUNCTION CALL      #
 # ---------------------------- #
 def main():
-    """Main function to generate and save sales data."""
+    # Main function to generate and save sales data.
     cpi_dict = load_cpi_data()
     df = generate_sales_data(cpi_dict)
     save_sales_data(df)
