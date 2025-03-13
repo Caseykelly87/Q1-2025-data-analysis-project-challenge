@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # ---------------------------- #
 import time
 
-def fetch_data_from_api(api_url, payload, api_key_env_var, method="POST", headers=None, max_retries=3, retry_delay=5):
+def fetch_data_from_api(api_url, payload, api_key_env_var, method="POST", headers=None, max_retries=3, retry_delay=0):
     """Generic function to fetch data from an API with retry logic."""
     api_key = os.getenv(api_key_env_var)
     if not api_key:
