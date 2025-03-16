@@ -1,329 +1,270 @@
 import pytest
-import requests
-import pandas as pd
 import os
-import logging
+import pandas as pd
+from aioresponses import aioresponses
+import asyncio
 from unittest.mock import patch, MagicMock
-
 from scripts.collect_data import (
-    fetch_data_from_api,
+    fetch_data_async,
     process_bls_api_response,
     process_fred_api_response,
+    process_fred_xml_response,
     save_data_to_csv,
-    fetch_cpi_data,
-    fetch_pce_data,
-    fetch_housing_data,
-    fetch_ppi_data,
-    fetch_gdp_data,
-    fetch_ces_data,
-    process_ces_api_response,
-    fetch_retail_sales_data,
-    fetch_grocery_sales_data,
-    fetch_median_household_income_data,
+    fetch_and_process_dataset,
 )
 
+# ---------------------------- #
+#        SETUP FIXTURES        #
+# ---------------------------- #
 
-def test_fetch_data_from_api_success_bls(mock_bls_api_response, bls_api_config):
-    """Test BLS API call returns expected JSON data."""
-    with patch("requests.post", return_value=mock_bls_api_response):
-        data = fetch_data_from_api(**bls_api_config)
-        assert "Results" in data
-        assert "series" in data["Results"]
-        assert isinstance(data["Results"]["series"], list)
+@pytest.fixture(scope="session", autouse=True)
+def set_env_vars():
+    """Mock API keys in environment variables."""
+    os.environ["BLS_API_KEY"] = "mock_bls_key"
+    os.environ["FRED_API_KEY"] = "mock_fred_key"
 
-def test_fetch_data_from_api_success_fred_pce(mock_fred_pce_api_response, fred_api_config):
-    """Test FRED API call returns expected JSON data for PCE."""
-    with patch("requests.get", return_value=mock_fred_pce_api_response):
-        data = fetch_data_from_api(
-            api_url=fred_api_config["api_url"],
-            payload=fred_api_config["payload"],
-            api_key_env_var=fred_api_config["api_key_env_var"],
-            method="GET",
-        )
-        assert "observations" in data
-        assert isinstance(data["observations"], list)
+@pytest.fixture
+def mock_bls_json():
+    """Mock BLS API JSON response."""
+    return {
+        "Results": {
+            "series": [{
+                "data": [
+                    {"year": "2020", "periodName": "January", "value": "100"},
+                    {"year": "2020", "periodName": "February", "value": "110"}
+                ]
+            }]
+        }
+    }
+
+@pytest.fixture
+def mock_fred_json():
+    """Mock FRED API JSON response."""
+    return {
+        "observations": [
+            {"date": "2020-01-01", "value": "100"},
+            {"date": "2020-02-01", "value": "110"}
+        ]
+    }
+
+@pytest.fixture
+def mock_fred_xml():
+    """Mock FRED API XML response."""
+    xml_data = """
+    <observations>
+        <observation date="2020-01-01" value="100"/>
+        <observation date="2020-02-01" value="110"/>
+    </observations>
+    """
+    return xml_data
+
+@pytest.fixture
+def mock_fetch_data():
+    async def mock_fetch(*args, **kwargs):
+        if "bls.gov" in args[0]:
+            return {
+                "Results": {
+                    "series": [{
+                        "data": [
+                            {"year": "2020", "periodName": "January", "value": "100"},
+                            {"year": "2020", "periodName": "February", "value": "110"}
+                        ]
+                    }]
+                }
+            }
+        elif "stlouisfed.org" in args[0]:
+            return {
+                "observations": [
+                    {"date": "2020-01-01", "value": "100"},
+                    {"date": "2020-02-01", "value": "110"}
+                ]
+            }
+        return {}
+    return mock_fetch
+
+# ---------------------------- #
+#        API FETCH TESTS       #
+# ---------------------------- #
+
+@pytest.mark.asyncio
+async def test_fetch_data_async():
+    """Test async API fetching using aioresponses."""
+    mock_api_url = "https://api.mock.api/test"
+    mock_response = {"key": "value"}
+
+    with aioresponses() as m:
+        m.post(mock_api_url, payload=mock_response)
+
+        payload = {"param": "test"}
+        response = await fetch_data_async(mock_api_url, payload, "BLS_API_KEY", method="POST")
+
+        assert response == mock_response
+
+@pytest.mark.asyncio
+async def test_fetch_data_async_retry():
+    """Test retry logic when API initially fails using aioresponses."""
+    mock_api_url = "https://api.mock.api/test"
+
+    with aioresponses() as m:
+        m.post(mock_api_url, status=500)  # Fail first attempt
+        m.post(mock_api_url, status=500)  # Fail second attempt
+        m.post(mock_api_url, payload={"key": "value"})  # Succeed on third attempt
+
+        payload = {"param": "test"}
+        response = await fetch_data_async(mock_api_url, payload, "BLS_API_KEY", method="POST")
+
+        assert response == {"key": "value"}
+
+@pytest.mark.parametrize("api_url, payload, api_key_env_var, expected_response", [
+    ("https://api.bls.gov/publicAPI/v2/timeseries/data/", {"seriesid": ["CUUR0000SA0"]}, "BLS_API_KEY", {"Results": {"series": [{"data": [{"year": "2020", "value": "100"}]}]}}),
+    ("https://api.stlouisfed.org/fred/series/observations", {"series_id": "GDP"}, "FRED_API_KEY", {"observations": [{"date": "2020-01-01", "value": "100"}]}),
+])
+@pytest.mark.asyncio
+async def test_fetch_data_async_param(api_url, payload, api_key_env_var, expected_response):
+    """Test fetch_data_async with parameterized inputs."""
+    with aioresponses() as m:
+        m.post(api_url, payload=expected_response)
+        response = await fetch_data_async(api_url, payload, api_key_env_var)
+        assert response == expected_response
 
 
-def test_fetch_data_from_api_failure_bls(caplog, bls_api_config):
-    """Test BLS API failure handling."""
-    mock_response = MagicMock()
-    mock_response.status_code = 500
-    mock_response.text = "Internal Server Error"
+@pytest.mark.asyncio
+async def test_concurrent_fetch_requests():
+    """Test multiple concurrent API fetch requests."""
+    mock_api_url = "https://api.mock.api/test"
+    with aioresponses() as m:
+        m.post(mock_api_url, payload={"key": "value"}, repeat=True)
+        tasks = [
+            fetch_data_async(mock_api_url, {"param": "test1"}, "BLS_API_KEY"),
+            fetch_data_async(mock_api_url, {"param": "test2"}, "BLS_API_KEY"),
+        ]
+        results = await asyncio.gather(*tasks)
+        assert all(result == {"key": "value"} for result in results), "All responses should match"
 
-    with patch("requests.post", return_value=mock_response):
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(RuntimeError, match="API request failed after 3 attempts with status code 500"):
-                fetch_data_from_api(**bls_api_config)
+@pytest.mark.asyncio
+async def test_fetch_data_async_invalid_payload():
+    """Test how fetch_data_async handles invalid API payloads."""
+    mock_api_url = "https://api.mock.api/test"
+    with aioresponses() as m:
+        m.post(mock_api_url, status=400)  # Simulate Bad Request
+        payload = {"invalid_param": "bad_value"}
+        with pytest.raises(RuntimeError, match="API request failed after"):
+            await fetch_data_async(mock_api_url, payload, "BLS_API_KEY", method="POST")
 
-    assert "API Request Failed: 500 - Internal Server Error" in caplog.text
+@pytest.mark.asyncio
+async def test_fetch_data_async_empty_response():
+    """Test how fetch_data_async handles empty API responses."""
+    mock_api_url = "https://api.mock.api/test"
+    with aioresponses() as m:
+        m.post(mock_api_url, payload={})  # Empty JSON
+        payload = {"param": "test"}
+        response = await fetch_data_async(mock_api_url, payload, "BLS_API_KEY", method="POST")
+        assert response == {}, "Response should be empty JSON"
 
-def test_fetch_data_from_api_failure_fred(caplog, fred_api_config):
-    """Test FRED API failure handling."""
-    mock_response = MagicMock()
-    mock_response.status_code = 500
-    mock_response.text = "Internal Server Error"
 
-    with patch("requests.get", return_value=mock_response):
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(RuntimeError, match="API request failed after 3 attempts with status code 500"):
-                fetch_data_from_api(
-                    api_url=fred_api_config["api_url"],
-                    payload=fred_api_config["payload"],
-                    api_key_env_var=fred_api_config["api_key_env_var"],
-                    method="GET",
-                )
+# ---------------------------- #
+#    DATA PROCESSING TESTS     #
+# ---------------------------- #
 
-    assert "API Request Failed: 500 - Internal Server Error" in caplog.text
+@pytest.mark.parametrize("function, response, required_fields, expected_columns, additional_args", [
+    (process_bls_api_response, {"Results": {"series": [{"data": [{"year": "2020", "value": "100"}]}]}}, ["year", "value"], ["year", "value"], {"dataset_name": "CPI"}),
+    (process_fred_api_response, {"observations": [{"date": "2020-01-01", "value": "100"}]}, ["date", "value"], ["date", "value"], None),
+])
+def test_process_api_response(function, response, required_fields, expected_columns, additional_args):
+    """Parameterized test for process functions."""
+    if additional_args:
+        df = function(response, required_fields, **additional_args)
+    else:
+        df = function(response, required_fields)
 
-def test_fetch_data_from_api_missing_api_key_bls(bls_api_config):
-    """Test missing BLS API key raises ValueError."""
-    with patch.dict(os.environ, {bls_api_config["api_key_env_var"]: ""}):
-        with pytest.raises(ValueError, match=f"{bls_api_config['api_key_env_var']} is not set! Check your .env file."):
-            fetch_data_from_api(**bls_api_config)
+    assert not df.empty
+    assert list(df.columns) == expected_columns
 
-def test_fetch_data_from_api_missing_api_key_fred(fred_api_config):
-    """Test missing FRED API key raises ValueError."""
-    with patch.dict(os.environ, {fred_api_config["api_key_env_var"]: ""}):
-        with pytest.raises(ValueError, match=f"{fred_api_config['api_key_env_var']} is not set! Check your .env file."):
-            fetch_data_from_api(
-                api_url=fred_api_config["api_url"],
-                payload=fred_api_config["payload"],
-                api_key_env_var=fred_api_config["api_key_env_var"],
-                method="GET",
-            )
+def test_process_fred_xml_response(mock_fred_xml):
+    """Test FRED XML response parsing."""
+    from xml.etree.ElementTree import fromstring
 
-def test_process_bls_api_response_valid(bls_required_fields, mock_bls_api_response):  # Pass the fixture as an argument
-    """Test processing BLS API response into DataFrame."""
-    df = process_bls_api_response(mock_bls_api_response.json(), bls_required_fields)  # Use mock_bls_api_response.json()
-    assert isinstance(df, pd.DataFrame)
-    assert list(df.columns) == bls_required_fields
-    assert len(df) == 2
-    assert df.iloc[0]["value"] == 301.8
+    xml_root = fromstring(mock_fred_xml)
+    df = process_fred_xml_response(xml_root, ["date", "value"])
 
-def test_process_fred_api_response_valid(fred_required_fields, mock_housing_api_response):  # Pass the fixture as an argument
-    """Test processing FRED API response into DataFrame."""
-    df = process_fred_api_response(mock_housing_api_response.json(), fred_required_fields)  # Use mock_housing_api_response.json()
-    assert isinstance(df, pd.DataFrame)
-    assert list(df.columns) == fred_required_fields
-    assert len(df) == 2
-    assert df.iloc[0]["value"] == 322600
+    assert not df.empty, "DataFrame should not be empty"
+    assert list(df.columns) == ["date", "value"], "Columns should be ['date', 'value']"
+    assert df["value"].iloc[0] == 100, "First value should be 100"
 
-def test_process_bls_api_response_empty(bls_required_fields):
-    """Test empty BLS API response handling."""
-    empty_response = {"Results": {"series": [{"data": []}]}}
-    df = process_bls_api_response(empty_response, bls_required_fields)
-    assert df.empty
+def test_process_bls_api_response_missing_fields():
+    """Test BLS response with missing required fields."""
+    response = {"Results": {"series": [{"data": [{"periodName": "January"}]}]}}  # 'year' and 'value' are missing
+    df = process_bls_api_response(response, ["year", "value", "periodName"], "CPI")
+    assert df.empty, "DataFrame should be empty when required fields are missing"
 
-def test_process_fred_api_response_empty(fred_required_fields):
-    """Test empty FRED API response handling."""
-    empty_response = {"observations": []}
-    df = process_fred_api_response(empty_response, fred_required_fields)
-    assert df.empty
+def test_process_fred_api_response_malformed():
+    """Test FRED response with malformed data."""
+    response = {"observations": [{"date": "invalid_date", "value": "not_a_number"}]}
+    df = process_fred_api_response(response, ["date", "value"])
+    assert not df.empty, "DataFrame should still be created"
+    assert pd.to_numeric(df["value"], errors="coerce").isna().iloc[0], "Value column should handle non-numeric gracefully"
 
-def test_process_bls_api_response_invalid_format(bls_required_fields):
-    """Test handling of unexpected BLS API response format."""
-    df = process_bls_api_response({}, bls_required_fields)
-    assert df.empty
-    assert list(df.columns) == bls_required_fields
 
-def test_process_fred_api_response_invalid_format(fred_required_fields):
-    """Test handling of unexpected FRED API response format."""
-    df = process_fred_api_response({}, fred_required_fields)
-    assert df.empty
-    assert list(df.columns) == fred_required_fields
+# ---------------------------- #
+#        FILE HANDLING         #
+# ---------------------------- #
 
 def test_save_data_to_csv(tmp_path):
-    """Test saving DataFrame to CSV."""
-    df = pd.DataFrame({"year": ["2024"], "periodName": ["January"], "value": ["301.8"]})
-    output_file = tmp_path / "cpi_test.csv"
+    """Test saving DataFrame to a CSV file."""
+    df = pd.DataFrame({"date": ["2020-01-01"], "value": [123]})
+    output_file = tmp_path / "test.csv"
+
     save_data_to_csv(df, output_file)
-    assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert list(saved_df.columns) == ["year", "periodName", "value"]
-
-def test_fetch_cpi_data_end_to_end(tmp_path, mock_bls_api_response):
-    """Integration test for full data collection pipeline for CPI."""
-    output_file = tmp_path / "cpi_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_bls_api_response.json()):
-        fetch_cpi_data(output_path=output_file)
 
     assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert not saved_df.empty
 
-def test_process_ces_api_response_success(mock_ces_api_response):
-    """Test successful processing of CES API response."""
-    required_fields = ["seriesID", "year", "periodName", "value"]
-    df = process_ces_api_response(mock_ces_api_response.json(), required_fields)
+def test_save_data_to_csv_empty_dataframe(tmp_path):
+    """Test saving an empty DataFrame."""
+    df = pd.DataFrame(columns=["date", "value"])
+    output_file = tmp_path / "empty_test.csv"
+    save_data_to_csv(df, output_file)
+    assert output_file.exists(), "Output file should still be created"
+    loaded_df = pd.read_csv(output_file)
+    assert loaded_df.empty, "Saved DataFrame should be empty"
 
-    assert isinstance(df, pd.DataFrame)
+def test_save_data_to_csv_non_writable_directory():
+    """Test saving a DataFrame to a non-writable directory."""
+    df = pd.DataFrame({"date": ["2020-01-01"], "value": [123]})
+    with patch("os.makedirs", side_effect=PermissionError), \
+         patch("pandas.DataFrame.to_csv", side_effect=PermissionError):
+        with pytest.raises(PermissionError):
+            save_data_to_csv(df, "/non_writable_dir/test.csv")
+
+
+# ---------------------------- #
+#       END-TO-END TESTS       #
+# ---------------------------- #
+
+@pytest.mark.asyncio
+async def test_fetch_and_process_dataset(tmp_path, mock_fetch_data):
+    """Test end-to-end fetch, process, and save dataset."""
+    api_config = {
+        "api_url": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
+        "api_key_env_var": "BLS_API_KEY",
+        "datasets": {
+            "CPI": {
+                "payload": {
+                    "seriesid": ["CUUR0000SA0"],
+                    "startyear": "2020",
+                    "endyear": "2024"
+                },
+                "required_fields": ["year", "value"]
+            }
+        }
+    }
+    output_path = tmp_path / "cpi_data.csv"
+
+    with patch("scripts.collect_data.fetch_data_async", new=mock_fetch_data):
+        await fetch_and_process_dataset(api_config, "CPI", output_path)
+
+    assert output_path.exists()
+    df = pd.read_csv(output_path)
     assert not df.empty
-    assert all(col in df.columns for col in required_fields)
+    assert list(df.columns) == ["year", "value"]
+    assert df["value"].iloc[0] == 100
 
-def test_process_ces_api_response_missing_key():
-    """Test handling of missing key in CES API response."""
-    missing_key_response = {"status": "REQUEST_SUCCEEDED", "responseTime": 789, "message":""}  # Missing 'Results' key
-    required_fields = ["seriesID", "year", "periodName", "value"]
-
-    try:
-        process_ces_api_response(missing_key_response, required_fields)
-    except ValueError as e:
-        assert str(e) == "Unexpected CES API response structure."
-    else:
-        assert False, "ValueError should have been raised"
-
-# Test cases for fetch_ces_data
-def test_fetch_ces_data_end_to_end(tmp_path, mock_ces_api_response):
-    """Integration test for full data collection pipeline for CES data."""
-    output_file = tmp_path / "ces_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_ces_api_response.json()):
-        fetch_ces_data(output_path=output_file)
-
-    assert os.path.exists(output_file)
-    df = pd.read_csv(output_file)
-    assert not df.empty
-    assert all(col in df.columns for col in ["seriesID", "year", "periodName", "value"])
-
-def test_fetch_pce_data_end_to_end(tmp_path, mock_fred_pce_api_response):
-    """Integration test for full data collection pipeline for PCE."""
-    output_file = tmp_path / "pce_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_fred_pce_api_response.json()):
-        fetch_pce_data(output_path=output_file)
-
-    assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert not saved_df.empty
-
-def test_fetch_data_from_api_timeout_bls(bls_api_config):
-    """Test BLS network timeout handling."""
-    with patch("requests.post", side_effect=requests.exceptions.Timeout):
-        with pytest.raises(RuntimeError, match="API request failed after 3 attempts due to network errors."):
-            fetch_data_from_api(**bls_api_config)
-
-def test_fetch_data_from_api_timeout_fred(fred_api_config):
-    """Test FRED network timeout handling."""
-    with patch("requests.get", side_effect=requests.exceptions.Timeout):
-        with pytest.raises(RuntimeError, match="API request failed after 3 attempts due to network errors."):
-            fetch_data_from_api(
-                api_url=fred_api_config["api_url"],
-                payload=fred_api_config["payload"],
-                api_key_env_var=fred_api_config["api_key_env_var"],
-                method="GET",
-            )
-
-def test_fetch_housing_data_end_to_end(tmp_path, mock_housing_api_response):
-    """Integration test for full data collection pipeline for housing data."""
-    output_file = tmp_path / "housing_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_housing_api_response.json()):
-        fetch_housing_data(output_path=output_file)
-
-    assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert not saved_df.empty
-    assert list(saved_df.columns) == ["date", "value"]
-
-def test_fetch_ppi_data_end_to_end(tmp_path, mock_ppi_api_response):
-    """Integration test for full data collection pipeline for PPI data."""
-    output_file = tmp_path / "ppi_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_ppi_api_response.json()):
-        fetch_pce_data(output_path=output_file)
-
-    assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert not saved_df.empty
-    assert list(saved_df.columns) == ["date", "value"]
-
-def test_fetch_gdp_data_end_to_end(tmp_path, mock_gdp_api_response):
-    """Integration test for full data collection pipeline for GDP data."""
-    output_file = tmp_path / "gdp_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_gdp_api_response.json()):
-        fetch_pce_data(output_path=output_file)
-
-    assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert not saved_df.empty
-    assert list(saved_df.columns) == ["date", "value"]
-
-def test_fetch_data_from_api_success_fred_housing(mock_housing_api_response, fred_api_config):
-    """Test FRED API call returns expected JSON data for Housing."""
-    with patch("requests.get", return_value=mock_housing_api_response):
-        data = fetch_data_from_api(
-            api_url=fred_api_config["api_url"],
-            payload=fred_api_config["payload"],
-            api_key_env_var=fred_api_config["api_key_env_var"],
-            method="GET",
-        )
-    assert "observations" in data
-    assert isinstance(data["observations"], list)
-
-def test_fetch_data_from_api_success_fred_ppi(mock_ppi_api_response, fred_api_config):
-    """Test FRED API call returns expected JSON data for PPI."""
-    with patch("requests.get", return_value=mock_ppi_api_response):
-        data = fetch_data_from_api(
-            api_url=fred_api_config["api_url"],
-            payload=fred_api_config["payload"],
-            api_key_env_var=fred_api_config["api_key_env_var"],
-            method="GET",
-        )
-        assert "observations" in data
-        assert isinstance(data["observations"], list)
-
-def test_fetch_data_from_api_success_fred_gdp(mock_gdp_api_response, fred_api_config):
-    """Test FRED API call returns expected JSON data for GDP."""
-    with patch("requests.get", return_value=mock_gdp_api_response):
-        data = fetch_data_from_api(
-            api_url=fred_api_config["api_url"],
-            payload=fred_api_config["payload"],
-            api_key_env_var=fred_api_config["api_key_env_var"],
-            method="GET",
-        )
-        assert "observations" in data
-        assert isinstance(data["observations"], list)
-
-
-# Test cases for fetch_retail_sales_data
-def test_fetch_retail_sales_data_end_to_end(tmp_path, mock_retail_sales_api_response): 
-    """Integration test for full data collection pipeline for retail sales."""
-    output_file = tmp_path / "retail_sales_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_retail_sales_api_response.json()):
-        fetch_retail_sales_data(output_path=output_file)
-
-    assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert not saved_df.empty
-    assert list(saved_df.columns) == ["date", "value"]
-
-
-# Test cases for fetch_grocery_sales_data
-def test_fetch_grocery_sales_data_end_to_end(tmp_path, mock_grocery_sales_api_response):
-    """Integration test for full data collection pipeline for grocery sales."""
-    output_file = tmp_path / "grocery_sales_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_grocery_sales_api_response.json()):
-        fetch_grocery_sales_data(output_path=output_file)
-
-    assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert not saved_df.empty
-    assert list(saved_df.columns) == ["date", "value"]
-
-
-# Test cases for fetch_median_household_income_data
-def test_fetch_median_household_income_data_end_to_end(tmp_path, mock_median_household_income_api_response):
-    """Integration test for full data collection pipeline for median household income."""
-    output_file = tmp_path / "median_household_income_full_test.csv"
-
-    with patch("scripts.collect_data.fetch_data_from_api", return_value=mock_median_household_income_api_response.json()):
-        fetch_median_household_income_data(output_path=output_file)
-
-    assert output_file.exists()
-    saved_df = pd.read_csv(output_file)
-    assert not saved_df.empty
-    assert list(saved_df.columns) == ["date", "value"]

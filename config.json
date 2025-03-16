@@ -1,0 +1,95 @@
+{
+    "BLS": {
+        "api_url": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
+        "api_key_env_var": "BLS_API_KEY",
+        "method": "POST",
+        "datasets": {
+            "CPI": {
+                "payload": {
+                    "seriesid": ["CUUR0000SA0"],
+                    "startyear": "2020",
+                    "endyear": "2024"
+                },
+                "required_fields": ["year", "periodName", "value"]
+            },
+            "CES": {
+                "payload": {
+                    "seriesid": ["CES0000000001"],
+                    "startyear": "2020",
+                    "endyear": "2024"
+                },
+                "required_fields": ["seriesID", "year", "periodName", "value"]
+            }
+        }
+    },
+    "FRED": {
+        "api_url": "https://api.stlouisfed.org/fred/series/observations",
+        "api_key_env_var": "FRED_API_KEY",
+        "method": "GET",
+        "datasets": {
+            "PCE": {
+                "payload": {
+                    "series_id": "PCECC96",
+                    "file_type": "json",
+                    "observation_start": "2020-01-01",
+                    "observation_end": "2024-12-31"
+                },
+                "required_fields": ["date", "value"]
+            },
+            "HOUSING": {
+                "payload": {
+                    "series_id": "MSPUS",
+                    "file_type": "json",
+                    "observation_start": "2020-01-01",
+                    "observation_end": "2024-12-31"
+                },
+                "required_fields": ["date", "value"]
+            },
+            "PPI": {
+                "payload": {
+                    "series_id": "PPIACO",
+                    "file_type": "json",
+                    "observation_start": "2020-01-01",
+                    "observation_end": "2024-12-31"
+                },
+                    "required_fields": ["date", "value"]
+            },
+            "GDP": {
+                "payload": {
+                    "series_id": "GDP",
+                    "file_type": "json",
+                    "observation_start": "2020-01-01",
+                    "observation_end": "2024-12-31"
+                },
+                    "required_fields": ["date", "value"]
+            },
+            "RETAIL_SALES": {
+                "payload": {
+                    "series_id": "MRTSSM44X72USS",
+               "file_type": "json",
+                    "observation_start": "2020-01-01",
+                    "observation_end": "2024-12-31"
+                },
+                    "required_fields": ["date", "value"]   
+            },
+            "GROCERY_SALES": {
+                "payload": {
+                    "series_id": "MRTSSM4451USS",
+                    "file_type": "json",
+                    "observation_start": "2020-01-01",
+                    "observation_end": "2024-12-31"
+                },
+                    "required_fields": ["date", "value"]
+            },
+            "MEDIAN_HOUSEHOLD_INCOME": {
+                "payload": {
+                    "series_id": "MEHOINUSA646N",
+                    "file_type": "json",
+                    "observation_start": "2020-01-01",
+                    "observation_end": "2024-12-31"
+                },
+                    "required_fields": ["date", "value"]   
+            }
+        }
+    }
+}     

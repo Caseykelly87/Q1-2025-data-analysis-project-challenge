@@ -1,8 +1,13 @@
 import os
 import logging
 import pandas as pd
-import requests
+import asyncio
+import aiohttp
 from dotenv import load_dotenv
+import json
+import xml.etree.ElementTree as ET
+import ssl
+import certifi
 
 # Load environment variables
 load_dotenv()
@@ -10,328 +15,179 @@ load_dotenv()
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-
 # ---------------------------- #
-#       API REQUEST HANDLER    #
+#       ASYNC API HANDLER      #
 # ---------------------------- #
-import time
+async def fetch_data_async(api_url, payload, api_key_env_var, method="POST", headers=None, max_retries=3, retry_delay=1):
+    """Asynchronously fetch data from an API with retry logic."""
+    # Set up SSL context using certifi to align with the behavior of `requests`
+    ssl_context = ssl.create_default_context()
+    ssl_context.load_verify_locations(certifi.where())  # Use certifi's trusted CA bundle
 
-def fetch_data_from_api(api_url, payload, api_key_env_var, method="POST", headers=None, max_retries=3, retry_delay=0):
-    """Generic function to fetch data from an API with retry logic."""
     api_key = os.getenv(api_key_env_var)
     if not api_key:
         raise ValueError(f"{api_key_env_var} is not set! Check your .env file.")
 
-    # Inject API key if needed
-    if "registrationkey" in payload:
-        payload["registrationkey"] = api_key
+    # Assign API key dynamically
+    if "bls.gov" in api_url:
+        payload["registrationkey"] = api_key  # BLS API expects "registrationkey"
+    elif "stlouisfed.org" in api_url:
+        payload["api_key"] = api_key  # FRED API expects "api_key"
 
     headers = headers or {"Content-type": "application/json"}
 
     for attempt in range(max_retries):
         try:
             logging.info(f"Sending API request to {api_url} (attempt {attempt + 1})...")
-
-            if method == "GET":
-                response = requests.get(api_url, params=payload, headers=headers)
-            else:  # Default to POST
-                response = requests.post(api_url, json=payload, headers=headers)
-
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logging.error(f"API Request Failed: {response.status_code} - {response.text}")
-                if attempt < max_retries - 1:
-                    logging.info(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ssl_context)) as session:
+                if method == "GET":
+                    async with session.get(api_url, params=payload, headers=headers) as response:
+                        return await _handle_response(response)
                 else:
-                    raise RuntimeError(f"API request failed after {max_retries} attempts with status code {response.status_code}")
-        except requests.exceptions.RequestException as e:
+                    async with session.post(api_url, json=payload, headers=headers) as response:
+                        return await _handle_response(response)
+
+        except aiohttp.ClientSSLError as ssl_error:
+            logging.error(f"SSL error: {ssl_error}")
+        except aiohttp.ClientError as e:
             logging.error(f"Network error: {e}")
-            if attempt < max_retries - 1:
-                logging.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                raise RuntimeError(f"API request failed after {max_retries} attempts due to network errors.")
+
+        if attempt < max_retries - 1:
+            logging.info(f"Retrying in {retry_delay} seconds...")
+            await asyncio.sleep(retry_delay)
+
+    raise RuntimeError(f"API request failed after {max_retries} attempts.")
 
 
+
+async def _handle_response(response):
+    """Handle the response from an HTTP request."""
+    response_text = await response.text()
+    if response.status == 200:
+        try:
+            return json.loads(response_text)  # JSON response
+        except json.JSONDecodeError:
+            return ET.fromstring(response_text)  # XML response
+    else:
+        logging.error(f"API Request Failed: {response.status} - {response_text}")
+        response.raise_for_status()
+
 # ---------------------------- #
-#      RESPONSE PROCESSING     #
+#       RESPONSE PROCESSING    #
 # ---------------------------- #
-def process_bls_api_response(json_data, required_fields):
+def process_bls_api_response(json_data, required_fields, dataset_name):
     """Process BLS API response and return a DataFrame."""
     try:
-        series = json_data.get("Results", {}).get("series",)
+        series = json_data.get("Results", {}).get("series", [])
         if not series or not series[0].get("data"):
-            logging.warning("Empty response from BLS API.")
+            logging.warning(f"Empty response from BLS API for dataset {dataset_name}.")
             return pd.DataFrame(columns=required_fields)
 
         df = pd.DataFrame(series[0]["data"])
+        if dataset_name == "CES" and "seriesID" in series[0]:
+            df["seriesID"] = series[0]["seriesID"]
 
         if "value" in df.columns:
             df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
-        if df["value"].isnull().any():
-            raise ValueError("Invalid data type in BLS API response")
-
         return df[required_fields]
 
-    except (KeyError, IndexError) as e:
-        logging.error(f"Unexpected BLS API response format: {e}")
-        raise ValueError("Unexpected BLS API response structure.")
-
-def process_ces_api_response(json_data, required_fields):
-    """Process CES API response and return a DataFrame."""
-    try:
-        # Check if 'series' list is empty
-        if not json_data['Results']['series']:
-            return pd.DataFrame(columns=required_fields)  # Return empty DataFrame
-
-        series = json_data['Results']['series'][0]
-        series_id = series['seriesID']
-        series_data = series['data']
-        for item in series_data:
-            item['seriesID'] = series_id
-        df = pd.DataFrame(series_data)
-        return df[required_fields]
-
-    except (KeyError, IndexError) as e:
-        logging.error(f"Unexpected CES API response format: {e}")
-        raise ValueError("Unexpected CES API response structure.")
+    except (KeyError, IndexError, ValueError) as e:
+        logging.error(f"Unexpected BLS API response format for dataset {dataset_name}: {e}")
+        return pd.DataFrame(columns=required_fields)
 
 def process_fred_api_response(json_data, required_fields):
     """Process FRED API response and return a DataFrame."""
     try:
-        observations = json_data.get("observations",)
+        observations = json_data.get("observations", [])
         if not observations:
             logging.warning("Empty response from FRED API.")
             return pd.DataFrame(columns=required_fields)
+
+        df = pd.DataFrame(observations)
+        if "value" in df.columns:
+            df["value"] = pd.to_numeric(df["value"], errors="coerce")
+
+        return df[required_fields]
+
+    except (KeyError, ValueError) as e:
+        logging.error(f"Unexpected FRED API response format: {e}")
+        return pd.DataFrame(columns=required_fields)
+    
+def process_fred_xml_response(xml_root, required_fields):
+    """Process FRED API XML response and return a DataFrame."""
+    try:
+        observations = []
+        for obs in xml_root.findall("observation"):
+            obs_data = {attr: obs.attrib[attr] for attr in obs.attrib}
+            observations.append(obs_data)
 
         df = pd.DataFrame(observations)
 
         if "value" in df.columns:
             df["value"] = pd.to_numeric(df["value"], errors="coerce")
 
-        if df["value"].isnull().any():
-            raise ValueError("Invalid data type in FRED API response")
-
         return df[required_fields]
 
-    except (KeyError, IndexError) as e:
-        logging.error(f"Unexpected FRED API response format: {e}")
-        raise ValueError("Unexpected FRED API response structure.")
-
+    except Exception as e:
+        logging.error(f"Error processing FRED API XML response: {e}")
+        return pd.DataFrame(columns=required_fields)
 
 # ---------------------------- #
-#          DATA SAVING         #
+#         DATA SAVING          #
 # ---------------------------- #
 def save_data_to_csv(df, output_path):
     """Save any DataFrame to a CSV file with proper directory handling."""
     output_path = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
     df.to_csv(output_path, index=False)
     logging.info(f"Data saved successfully to {output_path}")
 
-
 # ---------------------------- #
-#      BLS DATA FETCHING       #
+#    DATA FETCHING AND SAVE    #
 # ---------------------------- #
-BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+async def fetch_and_process_dataset(api_config, dataset_name, output_path):
+    """Fetch, process, and save a dataset based on API configuration."""
+    dataset_config = api_config["datasets"].get(dataset_name)
+    if not dataset_config:
+        raise KeyError(f"Dataset '{dataset_name}' not found in configuration.")
 
-# CPI Consumer Price Index
-CPI_SERIES_ID = "CUUR0000SA0"
-START_YEAR = "2020"
-END_YEAR = "2024"
+    payload = dataset_config["payload"]
+    required_fields = dataset_config.get("required_fields")
+    if not required_fields:
+        raise KeyError(f"'required_fields' missing for dataset: {dataset_name}")
+    
+    api_key_env_var = api_config["api_key_env_var"]
+    method = api_config.get("method", "POST")
 
+    response_data = await fetch_data_async(api_config["api_url"], payload, api_key_env_var, method=method)
 
-def fetch_cpi_data(output_path="data/raw/cpi_data.csv"):
-    """Fetch, process, and save CPI data."""
-    payload = {
-        "seriesid": [CPI_SERIES_ID],
-        "startyear": START_YEAR,
-        "endyear": END_YEAR
-    }
+    if isinstance(response_data, dict):
+        if "bls.gov" in api_config["api_url"]:
+            df = process_bls_api_response(response_data, required_fields, dataset_name)
+        elif "fred" in api_config["api_url"]:
+            df = process_fred_api_response(response_data, required_fields)
+    elif isinstance(response_data, ET.Element):
+        df = process_fred_xml_response(response_data, required_fields)
+    else:
+        raise ValueError("Unsupported response format from API.")
 
-    json_data = fetch_data_from_api(BLS_API_URL, payload, "BLS_API_KEY", method="POST")
-    df = process_bls_api_response(json_data, ["year", "periodName", "value"])
-    save_data_to_csv(df, output_path)
-
-# CES Current Employment Statistics
-CES_SERIES_ID = "CES0000000001"
-CES_START_YEAR = "2020"
-CES_END_YEAR = "2024"
-
-def fetch_ces_data(output_path="data/raw/ces_data.csv"):
-    """Fetch, process, and save CES data."""
-    payload = {
-        "seriesid": [CES_SERIES_ID],
-        "startyear": CES_START_YEAR,
-        "endyear": CES_END_YEAR,
-    }
-
-    ces_json_data = fetch_data_from_api(BLS_API_URL, payload, "BLS_API_KEY", method="POST")
-    ces_df = process_ces_api_response(ces_json_data, ["seriesID", "year", "periodName", "value"])
-    save_data_to_csv(ces_df, output_path)
-
-# ---------------------------- #
-#      FRED DATA FETCHING      #
-# ---------------------------- #
-FRED_API_URL = "https://api.stlouisfed.org/fred/series/observations"
-
-# PCE - PERSONAL CONSUMER EXPENDITURES
-PCE_SERIES_ID = "PCECC96"
-FRED_START_DATE = "2020-01-01"
-FRED_END_DATE = "2024-09-30"
-
-
-def fetch_pce_data(output_path="data/raw/pce_data.csv"):
-    """Fetch, process, and save Real Personal Consumption Expenditures data."""
-    payload = {
-        "series_id": PCE_SERIES_ID,
-        "api_key": os.getenv("FRED_API_KEY"),
-        "file_type": "json",
-        "observation_start": FRED_START_DATE,
-        "observation_end": FRED_END_DATE,
-    }
-
-    json_data = fetch_data_from_api(FRED_API_URL, payload, "FRED_API_KEY", method="GET")
-    df = process_fred_api_response(json_data, ["date", "value"])
-    save_data_to_csv(df, output_path)
-
-
-# HOUSING
-HOUSING_SERIES_ID = "MSPUS"
-HOUSING_START_DATE = "2020-01-01"
-HOUSING_END_DATE = "2024-12-31"  
-
-
-def fetch_housing_data(output_path="data/raw/housing_data.csv"):
-    """Fetch, process, and save housing market data."""
-    payload = {
-        "series_id": HOUSING_SERIES_ID,
-        "api_key": os.getenv("FRED_API_KEY"),
-        "file_type": "json",
-        "observation_start": HOUSING_START_DATE,
-        "observation_end": HOUSING_END_DATE,
-    }
-
-    json_data = fetch_data_from_api(FRED_API_URL, payload, "FRED_API_KEY", method="GET")
-    df = process_fred_api_response(json_data, ["date", "value"])
-    save_data_to_csv(df, output_path)
-
-
-# PPI - Producer Price Index
-PPI_SERIES_ID = "PPIACO" 
-PPI_START_DATE = "2020-01-01"
-PPI_END_DATE = "2024-12-31"
-
-
-def fetch_ppi_data(output_path="data/raw/ppi_data.csv"):
-    """Fetch, process, and save PPI data."""
-    payload = {
-        "series_id": PPI_SERIES_ID,
-        "api_key": os.getenv("FRED_API_KEY"),
-        "file_type": "json",
-        "observation_start": PPI_START_DATE,
-        "observation_end": PPI_END_DATE,
-    }
-
-    json_data = fetch_data_from_api(FRED_API_URL, payload, "FRED_API_KEY", method="GET")
-    df = process_fred_api_response(json_data, ["date", "value"])
-    save_data_to_csv(df, output_path)
-
-
-# GDP - Gross Domestic Product
-GDP_SERIES_ID = "GDP"
-GDP_START_DATE = "2020-01-01"
-GDP_END_DATE = "2024-12-31"
-
-
-def fetch_gdp_data(output_path="data/raw/gdp_data.csv"):
-    """Fetch, process, and save GDP data."""
-    payload = {
-        "series_id": GDP_SERIES_ID,
-        "api_key": os.getenv("FRED_API_KEY"),
-        "file_type": "json",
-        "observation_start": GDP_START_DATE,
-        "observation_end": GDP_END_DATE,
-    }
-
-    json_data = fetch_data_from_api(FRED_API_URL, payload, "FRED_API_KEY", method="GET")
-    df = process_fred_api_response(json_data, ["date", "value"])
-    save_data_to_csv(df, output_path)
-
-# RETAIL SALES
-RETAIL_SALES_SERIES_ID = "MRTSSM44X72USS"
-RETAIL_SALES_START_DATE = "2020-01-01"
-RETAIL_SALES_END_DATE = "2024-12-31"
-
-
-def fetch_retail_sales_data(output_path="data/raw/retail_sales.csv"):
-    """Fetch, process, and save retail sales data."""
-    payload = {
-        "series_id": RETAIL_SALES_SERIES_ID,
-        "api_key": os.getenv("FRED_API_KEY"),
-        "file_type": "json",
-        "observation_start": RETAIL_SALES_START_DATE,
-        "observation_end": RETAIL_SALES_END_DATE,
-    }
-
-    json_data = fetch_data_from_api(FRED_API_URL, payload, "FRED_API_KEY", method="GET")
-    df = process_fred_api_response(json_data, ["date", "value"])
-    save_data_to_csv(df, output_path)
-
-
-# GROCERY SALES
-GROCERY_SALES_SERIES_ID = "MRTSSM4451USS"
-GROCERY_SALES_START_DATE = "2020-01-01"
-GROCERY_SALES_END_DATE = "2024-12-31"
-
-def fetch_grocery_sales_data(output_path="data/raw/grocery_sales.csv"):
-    """Fetch, process, and save grocery sales data."""
-    payload = {
-        "series_id": GROCERY_SALES_SERIES_ID,
-        "api_key": os.getenv("FRED_API_KEY"),
-        "file_type": "json",
-        "observation_start": GROCERY_SALES_START_DATE,
-        "observation_end": GROCERY_SALES_END_DATE,
-    }
-
-    json_data = fetch_data_from_api(FRED_API_URL, payload, "FRED_API_KEY", method="GET")
-    df = process_fred_api_response(json_data, ["date", "value"])
-    save_data_to_csv(df, output_path)
-
-
-# MEDIAN HOUSEHOLD INCOME
-MEDIAN_HOUSEHOLD_INCOME_SERIES_ID = "MEHOINUSA646N"
-MEDIAN_HOUSEHOLD_INCOME_START_DATE = "2020-01-01"
-MEDIAN_HOUSEHOLD_INCOME_END_DATE = "2024-12-31"
-
-def fetch_median_household_income_data(output_path="data/raw/median_household_income.csv"):
-    """Fetch, process, and save median household income data."""
-    payload = {
-        "series_id": MEDIAN_HOUSEHOLD_INCOME_SERIES_ID,
-        "api_key": os.getenv("FRED_API_KEY"),
-        "file_type": "json",
-        "observation_start": MEDIAN_HOUSEHOLD_INCOME_START_DATE,
-        "observation_end": MEDIAN_HOUSEHOLD_INCOME_END_DATE,
-    }
-
-    json_data = fetch_data_from_api(FRED_API_URL, payload, "FRED_API_KEY", method="GET")
-    df = process_fred_api_response(json_data, ["date", "value"])
     save_data_to_csv(df, output_path)
 
 # ---------------------------- #
-#      MAIN FUNCTIONALITY      #
+#          MAIN SCRIPT         #
 # ---------------------------- #
+async def main():
+    tasks = []
+    for api_name, api_config in config.items():
+        for dataset_name in api_config["datasets"]:
+            output_path = f"data/raw/{dataset_name.lower()}_data.csv"
+            tasks.append(fetch_and_process_dataset(api_config, dataset_name, output_path))
+
+    await asyncio.gather(*tasks)
+
 if __name__ == "__main__":
-    fetch_cpi_data()
-    fetch_pce_data()
-    fetch_housing_data()
-    fetch_ppi_data()
-    fetch_gdp_data()
-    fetch_ces_data()
-    fetch_retail_sales_data()
-    fetch_grocery_sales_data()
-    fetch_median_household_income_data()
+    with open("config.json", "r") as config_file:
+        config = json.load(config_file)
+
+    asyncio.run(main())
