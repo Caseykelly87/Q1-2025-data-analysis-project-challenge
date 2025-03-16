@@ -22,7 +22,8 @@ def set_env_vars():
     """Mock API keys in environment variables."""
     os.environ["BLS_API_KEY"] = "mock_bls_key"
     os.environ["FRED_API_KEY"] = "mock_fred_key"
-
+    os.environ["CENSUS_API_KEY"] = "mock_census_key"
+    
 @pytest.fixture
 def mock_bls_json():
     """Mock BLS API JSON response."""
